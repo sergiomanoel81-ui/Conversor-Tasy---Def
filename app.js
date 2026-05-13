@@ -806,20 +806,31 @@ async function gerarArquivoExcel(resultados, estabelecimento) {
     XLSX.utils.book_append_sheet(wb, wsCobertura, 'Auditoria_Cobertura');
 
     // Aba: Auditoria - Matriz Paciente x Exame
+    // Formato planilha intuitiva: colunas nomeadas pelo exame, valores ✓ / em branco / ⚠
     const matriz = auditoria.porPaciente.map(p => {
         const linha = {
-            NM_PACIENTE: p.nome,
-            NR_ATENDIMENTO: p.atendimento,
-            QTD_PREENCHIDOS: p.preenchidos.length,
-            QTD_VAZIOS: p.vazios.length
+            'Atendimento': p.atendimento,
+            'Paciente': p.nome,
+            'Preenchidos': p.preenchidos.length,
+            'Vazios': p.vazios.length
         };
         Object.keys(MAPEAMENTO_EXAMES).forEach(codigo => {
             const preenchido = p.preenchidos.find(e => e.codigo === codigo);
-            linha[`${codigo}_${MAPEAMENTO_EXAMES[codigo].nome}`] = preenchido ? '✓' : '';
+            const zerado = p.numberZerados.find(e => e.codigo === codigo);
+            const nomeColuna = `${MAPEAMENTO_EXAMES[codigo].nome} (${codigo})`;
+            if (zerado) linha[nomeColuna] = '⚠ texto';
+            else if (preenchido) linha[nomeColuna] = preenchido.valor;
+            else linha[nomeColuna] = '';
         });
         return linha;
     });
     const wsMatriz = XLSX.utils.json_to_sheet(matriz);
+    // Ajusta largura das colunas para legibilidade
+    const colWidths = [
+        { wch: 12 }, { wch: 35 }, { wch: 12 }, { wch: 10 }
+    ];
+    Object.keys(MAPEAMENTO_EXAMES).forEach(() => colWidths.push({ wch: 22 }));
+    wsMatriz['!cols'] = colWidths;
     XLSX.utils.book_append_sheet(wb, wsMatriz, 'Auditoria_Matriz');
 
     // Aba: Campos NUMBER zerados (recebido texto)
@@ -1079,32 +1090,29 @@ function mostrarAuditoria() {
         </div>
     `;
 
-    // Matriz paciente × exame
+    // Resumo simples por paciente (sem a matriz larga)
     html += `
-        <h4 style="margin: 25px 0 10px; color: #495057;">Matriz Paciente × Exame</h4>
-        <div style="max-height: 500px; overflow: auto; background: #f8f9fa; border-radius: 10px; padding: 15px;">
+        <h4 style="margin: 25px 0 10px; color: #495057;">Resumo por Paciente</h4>
+        <div class="alert alert-info">
+            <span>📊</span>
+            <div>A matriz detalhada <strong>Paciente × Exame</strong> está na aba <strong>Auditoria_Matriz</strong> do arquivo <code>.xls</code> baixado — formato planilha, fácil de filtrar e imprimir.</div>
+        </div>
+        <div style="max-height: 400px; overflow-y: auto; background: #f8f9fa; border-radius: 10px; padding: 15px;">
         <table class="audit-table">
-            <thead><tr><th>Atend.</th><th>Paciente</th><th>Preench.</th>
+            <thead><tr><th>Atend.</th><th>Paciente</th><th>Preenchidos</th><th>Vazios</th><th>NUMBER zerados</th></tr></thead>
+            <tbody>
     `;
-    Object.keys(MAPEAMENTO_EXAMES).forEach(codigo => {
-        const nome = MAPEAMENTO_EXAMES[codigo].nome;
-        html += `<th title="Código ${codigo}" style="white-space: nowrap;">${nome} (${codigo})</th>`;
-    });
-    html += `</tr></thead><tbody>`;
     auditoria.porPaciente.forEach(p => {
-        html += `<tr><td>${p.atendimento}</td><td>${p.nome}</td><td><strong>${p.preenchidos.length}</strong>/${p.preenchidos.length + p.vazios.length}</td>`;
-        Object.keys(MAPEAMENTO_EXAMES).forEach(codigo => {
-            const preench = p.preenchidos.find(e => e.codigo === codigo);
-            const zerado = p.numberZerados.find(e => e.codigo === codigo);
-            if (zerado) {
-                html += `<td title="NUMBER zerado: '${zerado.textoOriginal}'" style="background:#f8d7da; text-align:center; color:#721c24;">⚠</td>`;
-            } else if (preench) {
-                html += `<td title="${preench.valor} (${preench.origem})" style="background:#d4edda; text-align:center; color:#155724;">✓</td>`;
-            } else {
-                html += `<td style="text-align:center; color:#adb5bd;">—</td>`;
-            }
-        });
-        html += `</tr>`;
+        const total = p.preenchidos.length + p.vazios.length;
+        const pct = total > 0 ? Math.round((p.preenchidos.length / total) * 100) : 0;
+        const cor = pct >= 80 ? '#28a745' : pct >= 40 ? '#ffc107' : '#dc3545';
+        html += `<tr>
+            <td>${p.atendimento}</td>
+            <td>${p.nome}</td>
+            <td style="color:#28a745; font-weight:600;">${p.preenchidos.length}/${total} <span style="color:${cor};">(${pct}%)</span></td>
+            <td style="color:#6c757d;">${p.vazios.length}</td>
+            <td>${p.numberZerados.length > 0 ? `<span class="status-badge badge-danger">${p.numberZerados.length}</span>` : '—'}</td>
+        </tr>`;
     });
     html += `</tbody></table></div>`;
 
