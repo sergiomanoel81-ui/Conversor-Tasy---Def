@@ -838,10 +838,10 @@ const ESTILO_CELULA = {
     font: { name: 'Calibri', sz: 10 },
     alignment: { vertical: 'center', wrapText: false },
     border: {
-        top: { style: 'thin', color: { rgb: 'DEE2E6' } },
-        bottom: { style: 'thin', color: { rgb: 'DEE2E6' } },
-        left: { style: 'thin', color: { rgb: 'DEE2E6' } },
-        right: { style: 'thin', color: { rgb: 'DEE2E6' } }
+        top: { style: 'thin', color: { rgb: 'B8B0E8' } },
+        bottom: { style: 'thin', color: { rgb: 'B8B0E8' } },
+        left: { style: 'thin', color: { rgb: 'B8B0E8' } },
+        right: { style: 'thin', color: { rgb: 'B8B0E8' } }
     }
 };
 const ESTILO_CELULA_ALT = {
