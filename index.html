@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Sistema de Importação Tasy - Exames Laboratoriais</title>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
     <style>
         * {
             margin: 0;
@@ -675,9 +675,12 @@
                     <p style="color: #6c757d; margin-bottom: 30px;">
                         Os arquivos foram gerados com sucesso.
                     </p>
-                    <div style="display: flex; gap: 15px; justify-content: center;">
+                    <div style="display: flex; gap: 15px; justify-content: center; flex-wrap: wrap;">
                         <button class="btn btn-success" id="btnDownloadExcel" style="display: none;">
-                            📥 Download .xls
+                            📥 Download .xls (Tasy)
+                        </button>
+                        <button class="btn btn-primary" id="btnDownloadAuditoria" style="display: none;">
+                            📊 Download Auditoria
                         </button>
                         <button class="btn btn-primary" id="btnDownloadLog" style="display: none;">
                             📄 Download LOG

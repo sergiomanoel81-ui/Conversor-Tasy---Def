@@ -612,13 +612,15 @@ async function processarArquivos() {
         
         // Gerar arquivos
         const nomeArquivo = await gerarArquivoExcel(resultados, estabelecimento);
+        await gerarArquivoAuditoria(estabelecimento, protocolo);
         await gerarLog(resultados, nomeArquivo);
-        
+
         atualizarProgresso(100);
 
         // Mostrar resultado
         document.getElementById('resultSection').style.display = 'block';
         document.getElementById('btnDownloadExcel').style.display = 'inline-block';
+        document.getElementById('btnDownloadAuditoria').style.display = 'inline-block';
         document.getElementById('btnDownloadLog').style.display = 'inline-block';
 
         // Renderizar relatório de auditoria na tela
@@ -777,95 +779,334 @@ function atualizarProgresso(percentual) {
 }
 
 async function gerarArquivoExcel(resultados, estabelecimento) {
+    // Arquivo principal contém APENAS a aba de Exames (para importação no Tasy)
     const wb = XLSX.utils.book_new();
-
-    // Aba principal: Exames
     const wsExames = XLSX.utils.json_to_sheet(resultados, { header: ORDEM_COLUNAS });
     XLSX.utils.book_append_sheet(wb, wsExames, 'Exames');
-
-    // Aba: Auditoria - Cobertura por Exame
-    const cobertura = Object.keys(MAPEAMENTO_EXAMES).map(codigo => {
-        const cov = auditoria.examesCobertura[codigo];
-        if (!cov) return null;
-        const total = cov.preenchidos + cov.vazios;
-        const pct = total > 0 ? Math.round((cov.preenchidos / total) * 100) : 0;
-        return {
-            CODIGO: codigo,
-            EXAME: cov.nome,
-            TIPO: cov.tipo,
-            PREENCHIDOS: cov.preenchidos,
-            VAZIOS: cov.vazios,
-            TOTAL: total,
-            'COBERTURA_%': pct,
-            ORIGEM_BASICOS: cov.origemBasicos,
-            ORIGEM_COMPLEMENTARES: cov.origemComplementares,
-            NUMBER_ZERADOS: cov.numberZerados
-        };
-    }).filter(Boolean);
-    const wsCobertura = XLSX.utils.json_to_sheet(cobertura);
-    XLSX.utils.book_append_sheet(wb, wsCobertura, 'Auditoria_Cobertura');
-
-    // Aba: Auditoria - Matriz Paciente x Exame
-    // Formato planilha intuitiva: colunas nomeadas pelo exame, valores ✓ / em branco / ⚠
-    const matriz = auditoria.porPaciente.map(p => {
-        const linha = {
-            'Atendimento': p.atendimento,
-            'Paciente': p.nome,
-            'Preenchidos': p.preenchidos.length,
-            'Vazios': p.vazios.length
-        };
-        Object.keys(MAPEAMENTO_EXAMES).forEach(codigo => {
-            const preenchido = p.preenchidos.find(e => e.codigo === codigo);
-            const zerado = p.numberZerados.find(e => e.codigo === codigo);
-            const nomeColuna = `${MAPEAMENTO_EXAMES[codigo].nome} (${codigo})`;
-            if (zerado) linha[nomeColuna] = '⚠ texto';
-            else if (preenchido) linha[nomeColuna] = preenchido.valor;
-            else linha[nomeColuna] = '';
-        });
-        return linha;
-    });
-    const wsMatriz = XLSX.utils.json_to_sheet(matriz);
-    // Ajusta largura das colunas para legibilidade
-    const colWidths = [
-        { wch: 12 }, { wch: 35 }, { wch: 12 }, { wch: 10 }
-    ];
-    Object.keys(MAPEAMENTO_EXAMES).forEach(() => colWidths.push({ wch: 22 }));
-    wsMatriz['!cols'] = colWidths;
-    XLSX.utils.book_append_sheet(wb, wsMatriz, 'Auditoria_Matriz');
-
-    // Aba: Campos NUMBER zerados (recebido texto)
-    if (auditoria.numberZerados.length > 0) {
-        const wsNumber = XLSX.utils.json_to_sheet(auditoria.numberZerados.map(n => ({
-            NM_PACIENTE: n.paciente,
-            NR_ATENDIMENTO: n.atendimento,
-            CODIGO: n.codigo,
-            EXAME: n.nome,
-            ORIGEM: n.origem,
-            TEXTO_RECEBIDO: n.textoOriginal
-        })));
-        XLSX.utils.book_append_sheet(wb, wsNumber, 'Auditoria_NumberZerados');
-    }
-
-    // Aba: Colunas órfãs do laboratório
-    if (auditoria.colunasOrfas.length > 0) {
-        const wsOrfas = XLSX.utils.json_to_sheet(auditoria.colunasOrfas.map(o => ({
-            COLUNA: o.coluna,
-            PLANILHA: o.planilha,
-            OBSERVACAO: 'Coluna presente no arquivo do laboratório mas não mapeada para código Tasy'
-        })));
-        XLSX.utils.book_append_sheet(wb, wsOrfas, 'Auditoria_ColunasOrfas');
-    }
 
     const hoje = new Date();
     const dataFormatada = hoje.toISOString().split('T')[0].replace(/-/g, '');
     const nomeEstabelecimento = ESTABELECIMENTOS[estabelecimento];
     const nomeArquivo = `Exames_${nomeEstabelecimento}_${dataFormatada}.xls`;
 
-    // Exportar em formato BIFF8 (.xls - Excel 97-2003)
+    // BIFF8 (.xls - Excel 97-2003) para compatibilidade com sistemas legados
     const wbout = XLSX.write(wb, { bookType: 'biff8', type: 'array' });
     const blob = new Blob([wbout], { type: 'application/vnd.ms-excel' });
 
     document.getElementById('btnDownloadExcel').onclick = function() {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = nomeArquivo;
+        a.click();
+    };
+
+    return nomeArquivo;
+}
+
+// ───────────────────────────────────────────────────────────────
+// Estilos reutilizáveis para a planilha de auditoria
+// ───────────────────────────────────────────────────────────────
+const ESTILO_TITULO = {
+    font: { name: 'Calibri', sz: 16, bold: true, color: { rgb: 'FFFFFF' } },
+    fill: { fgColor: { rgb: '4B3F8A' } },
+    alignment: { horizontal: 'center', vertical: 'center' },
+    border: {
+        top: { style: 'thin', color: { rgb: '2C2456' } },
+        bottom: { style: 'thin', color: { rgb: '2C2456' } },
+        left: { style: 'thin', color: { rgb: '2C2456' } },
+        right: { style: 'thin', color: { rgb: '2C2456' } }
+    }
+};
+const ESTILO_SUBTITULO = {
+    font: { name: 'Calibri', sz: 11, italic: true, color: { rgb: '495057' } },
+    fill: { fgColor: { rgb: 'F1F0FA' } },
+    alignment: { horizontal: 'center', vertical: 'center' }
+};
+const ESTILO_HEADER = {
+    font: { name: 'Calibri', sz: 11, bold: true, color: { rgb: 'FFFFFF' } },
+    fill: { fgColor: { rgb: '667EEA' } },
+    alignment: { horizontal: 'center', vertical: 'center', wrapText: true },
+    border: {
+        top: { style: 'thin', color: { rgb: 'FFFFFF' } },
+        bottom: { style: 'medium', color: { rgb: '4B3F8A' } },
+        left: { style: 'thin', color: { rgb: 'FFFFFF' } },
+        right: { style: 'thin', color: { rgb: 'FFFFFF' } }
+    }
+};
+const ESTILO_CELULA = {
+    font: { name: 'Calibri', sz: 10 },
+    alignment: { vertical: 'center', wrapText: false },
+    border: {
+        top: { style: 'thin', color: { rgb: 'DEE2E6' } },
+        bottom: { style: 'thin', color: { rgb: 'DEE2E6' } },
+        left: { style: 'thin', color: { rgb: 'DEE2E6' } },
+        right: { style: 'thin', color: { rgb: 'DEE2E6' } }
+    }
+};
+const ESTILO_CELULA_ALT = {
+    ...ESTILO_CELULA,
+    fill: { fgColor: { rgb: 'F8F9FA' } }
+};
+const ESTILO_PREENCHIDO = {
+    ...ESTILO_CELULA,
+    font: { name: 'Calibri', sz: 10, bold: true, color: { rgb: '155724' } },
+    fill: { fgColor: { rgb: 'D4EDDA' } },
+    alignment: { horizontal: 'center', vertical: 'center' }
+};
+const ESTILO_VAZIO = {
+    ...ESTILO_CELULA,
+    font: { name: 'Calibri', sz: 10, color: { rgb: 'ADB5BD' } },
+    fill: { fgColor: { rgb: 'F8F9FA' } },
+    alignment: { horizontal: 'center', vertical: 'center' }
+};
+const ESTILO_ZERADO = {
+    ...ESTILO_CELULA,
+    font: { name: 'Calibri', sz: 10, bold: true, color: { rgb: '721C24' } },
+    fill: { fgColor: { rgb: 'F8D7DA' } },
+    alignment: { horizontal: 'center', vertical: 'center' }
+};
+const ESTILO_BOLD = {
+    ...ESTILO_CELULA,
+    font: { name: 'Calibri', sz: 10, bold: true }
+};
+
+// Aplica estilo a um intervalo de células do worksheet
+function aplicarEstilo(ws, ref, estilo) {
+    if (!ws[ref]) ws[ref] = { t: 's', v: '' };
+    ws[ref].s = estilo;
+}
+
+// Cria célula com valor e estilo
+function celula(valor, estilo, tipo) {
+    return { t: tipo || (typeof valor === 'number' ? 'n' : 's'), v: valor, s: estilo };
+}
+
+async function gerarArquivoAuditoria(estabelecimento, protocolo) {
+    const wb = XLSX.utils.book_new();
+    const hoje = new Date();
+    const dataHora = hoje.toLocaleString('pt-BR');
+    const estab = ESTABELECIMENTOS[estabelecimento] || '';
+    const totalCampos = auditoria.totalPreenchidos + auditoria.totalVazios;
+    const pctGeral = totalCampos > 0 ? Math.round((auditoria.totalPreenchidos / totalCampos) * 100) : 0;
+
+    // ───────── ABA 1: RESUMO ─────────
+    const aoaResumo = [
+        ['RELATÓRIO DE AUDITORIA — CONVERSOR TASY'],
+        [`${estab}  •  Protocolo: ${protocolo}  •  Gerado em: ${dataHora}`],
+        [],
+        ['INDICADOR', 'VALOR'],
+        ['Pacientes processados', auditoria.porPaciente.length],
+        ['Campos preenchidos', auditoria.totalPreenchidos],
+        ['Campos vazios', auditoria.totalVazios],
+        ['Cobertura geral (%)', pctGeral],
+        ['Origem: Exames Básicos', auditoria.origemBasicos],
+        ['Origem: Exames Complementares', auditoria.origemComplementares],
+        ['Campos NUMBER zerados (texto recebido)', auditoria.numberZerados.length],
+        ['Colunas do lab não mapeadas', auditoria.colunasOrfas.length]
+    ];
+    const wsResumo = XLSX.utils.aoa_to_sheet(aoaResumo);
+    wsResumo['!cols'] = [{ wch: 42 }, { wch: 20 }];
+    wsResumo['!merges'] = [
+        { s: { r: 0, c: 0 }, e: { r: 0, c: 1 } },
+        { s: { r: 1, c: 0 }, e: { r: 1, c: 1 } }
+    ];
+    wsResumo['!rows'] = [{ hpt: 28 }, { hpt: 20 }];
+    aplicarEstilo(wsResumo, 'A1', ESTILO_TITULO);
+    aplicarEstilo(wsResumo, 'A2', ESTILO_SUBTITULO);
+    aplicarEstilo(wsResumo, 'A4', ESTILO_HEADER);
+    aplicarEstilo(wsResumo, 'B4', ESTILO_HEADER);
+    for (let r = 4; r < aoaResumo.length; r++) {
+        const alt = r % 2 === 0 ? ESTILO_CELULA : ESTILO_CELULA_ALT;
+        aplicarEstilo(wsResumo, `A${r + 1}`, { ...alt, font: { ...ESTILO_CELULA.font, bold: true } });
+        aplicarEstilo(wsResumo, `B${r + 1}`, { ...alt, alignment: { horizontal: 'right' } });
+    }
+    XLSX.utils.book_append_sheet(wb, wsResumo, 'Resumo');
+
+    // ───────── ABA 2: COBERTURA POR EXAME ─────────
+    const aoaCobertura = [
+        ['COBERTURA POR EXAME'],
+        ['Quantos pacientes tiveram cada exame preenchido vs vazio'],
+        [],
+        ['Código', 'Exame', 'Tipo', 'Preench.', 'Vazios', 'Total', 'Cobertura %', 'Origem Básicos', 'Origem Compl.', 'NUMBER zerados']
+    ];
+    Object.keys(MAPEAMENTO_EXAMES).forEach(codigo => {
+        const cov = auditoria.examesCobertura[codigo];
+        if (!cov) return;
+        const total = cov.preenchidos + cov.vazios;
+        const pct = total > 0 ? Math.round((cov.preenchidos / total) * 100) : 0;
+        aoaCobertura.push([codigo, cov.nome, cov.tipo, cov.preenchidos, cov.vazios, total, pct, cov.origemBasicos, cov.origemComplementares, cov.numberZerados]);
+    });
+    const wsCobertura = XLSX.utils.aoa_to_sheet(aoaCobertura);
+    wsCobertura['!cols'] = [
+        { wch: 10 }, { wch: 35 }, { wch: 10 }, { wch: 10 }, { wch: 10 },
+        { wch: 8 }, { wch: 12 }, { wch: 14 }, { wch: 14 }, { wch: 14 }
+    ];
+    wsCobertura['!merges'] = [
+        { s: { r: 0, c: 0 }, e: { r: 0, c: 9 } },
+        { s: { r: 1, c: 0 }, e: { r: 1, c: 9 } }
+    ];
+    wsCobertura['!rows'] = [{ hpt: 28 }, { hpt: 20 }, { hpt: 8 }, { hpt: 32 }];
+    wsCobertura['!freeze'] = { xSplit: 0, ySplit: 4 };
+    aplicarEstilo(wsCobertura, 'A1', ESTILO_TITULO);
+    aplicarEstilo(wsCobertura, 'A2', ESTILO_SUBTITULO);
+    ['A4', 'B4', 'C4', 'D4', 'E4', 'F4', 'G4', 'H4', 'I4', 'J4'].forEach(ref => aplicarEstilo(wsCobertura, ref, ESTILO_HEADER));
+    for (let r = 4; r < aoaCobertura.length; r++) {
+        const alt = r % 2 === 0 ? ESTILO_CELULA : ESTILO_CELULA_ALT;
+        const pct = aoaCobertura[r][6];
+        const corPct = pct >= 80 ? '155724' : pct >= 40 ? '856404' : '721C24';
+        const fillPct = pct >= 80 ? 'D4EDDA' : pct >= 40 ? 'FFF3CD' : 'F8D7DA';
+        aplicarEstilo(wsCobertura, `A${r + 1}`, { ...alt, alignment: { horizontal: 'center' } });
+        aplicarEstilo(wsCobertura, `B${r + 1}`, alt);
+        aplicarEstilo(wsCobertura, `C${r + 1}`, { ...alt, alignment: { horizontal: 'center' } });
+        aplicarEstilo(wsCobertura, `D${r + 1}`, { ...alt, alignment: { horizontal: 'center' }, font: { ...alt.font, bold: true, color: { rgb: '155724' } } });
+        aplicarEstilo(wsCobertura, `E${r + 1}`, { ...alt, alignment: { horizontal: 'center' }, font: { ...alt.font, color: { rgb: '6C757D' } } });
+        aplicarEstilo(wsCobertura, `F${r + 1}`, { ...alt, alignment: { horizontal: 'center' } });
+        aplicarEstilo(wsCobertura, `G${r + 1}`, {
+            ...alt,
+            alignment: { horizontal: 'center' },
+            font: { ...alt.font, bold: true, color: { rgb: corPct } },
+            fill: { fgColor: { rgb: fillPct } }
+        });
+        aplicarEstilo(wsCobertura, `H${r + 1}`, { ...alt, alignment: { horizontal: 'center' } });
+        aplicarEstilo(wsCobertura, `I${r + 1}`, { ...alt, alignment: { horizontal: 'center' } });
+        aplicarEstilo(wsCobertura, `J${r + 1}`, { ...alt, alignment: { horizontal: 'center' }, font: { ...alt.font, color: { rgb: '721C24' } } });
+    }
+    XLSX.utils.book_append_sheet(wb, wsCobertura, 'Cobertura');
+
+    // ───────── ABA 3: MATRIZ PACIENTE × EXAME ─────────
+    const codigosExame = Object.keys(MAPEAMENTO_EXAMES);
+    const headerMatriz = ['Atendimento', 'Paciente', 'Preench.', 'Vazios', '%'];
+    codigosExame.forEach(c => headerMatriz.push(`${MAPEAMENTO_EXAMES[c].nome} (${c})`));
+    const aoaMatriz = [
+        ['MATRIZ PACIENTE × EXAME'],
+        ['Valor do exame, célula vazia = sem resultado, ⚠ = NUMBER recebeu texto'],
+        [],
+        headerMatriz
+    ];
+    auditoria.porPaciente.forEach(p => {
+        const total = p.preenchidos.length + p.vazios.length;
+        const pct = total > 0 ? Math.round((p.preenchidos.length / total) * 100) : 0;
+        const linha = [p.atendimento, p.nome, p.preenchidos.length, p.vazios.length, pct];
+        codigosExame.forEach(codigo => {
+            const preench = p.preenchidos.find(e => e.codigo === codigo);
+            const zerado = p.numberZerados.find(e => e.codigo === codigo);
+            if (zerado) linha.push('⚠ TEXTO');
+            else if (preench) linha.push(preench.valor);
+            else linha.push('');
+        });
+        aoaMatriz.push(linha);
+    });
+    const wsMatriz = XLSX.utils.aoa_to_sheet(aoaMatriz);
+    const colsMatriz = [{ wch: 12 }, { wch: 32 }, { wch: 10 }, { wch: 8 }, { wch: 8 }];
+    codigosExame.forEach(() => colsMatriz.push({ wch: 18 }));
+    wsMatriz['!cols'] = colsMatriz;
+    wsMatriz['!merges'] = [
+        { s: { r: 0, c: 0 }, e: { r: 0, c: headerMatriz.length - 1 } },
+        { s: { r: 1, c: 0 }, e: { r: 1, c: headerMatriz.length - 1 } }
+    ];
+    wsMatriz['!rows'] = [{ hpt: 28 }, { hpt: 20 }, { hpt: 8 }, { hpt: 42 }];
+    wsMatriz['!freeze'] = { xSplit: 2, ySplit: 4 };
+    aplicarEstilo(wsMatriz, 'A1', ESTILO_TITULO);
+    aplicarEstilo(wsMatriz, 'A2', ESTILO_SUBTITULO);
+    for (let c = 0; c < headerMatriz.length; c++) {
+        aplicarEstilo(wsMatriz, XLSX.utils.encode_cell({ r: 3, c }), ESTILO_HEADER);
+    }
+    for (let r = 4; r < aoaMatriz.length; r++) {
+        const alt = r % 2 === 0 ? ESTILO_CELULA : ESTILO_CELULA_ALT;
+        aplicarEstilo(wsMatriz, XLSX.utils.encode_cell({ r, c: 0 }), { ...alt, alignment: { horizontal: 'center' } });
+        aplicarEstilo(wsMatriz, XLSX.utils.encode_cell({ r, c: 1 }), { ...alt, font: { ...alt.font, bold: true } });
+        aplicarEstilo(wsMatriz, XLSX.utils.encode_cell({ r, c: 2 }), { ...alt, alignment: { horizontal: 'center' }, font: { ...alt.font, color: { rgb: '155724' }, bold: true } });
+        aplicarEstilo(wsMatriz, XLSX.utils.encode_cell({ r, c: 3 }), { ...alt, alignment: { horizontal: 'center' }, font: { ...alt.font, color: { rgb: '6C757D' } } });
+        const pct = aoaMatriz[r][4];
+        const fillPct = pct >= 80 ? 'D4EDDA' : pct >= 40 ? 'FFF3CD' : 'F8D7DA';
+        const corPct = pct >= 80 ? '155724' : pct >= 40 ? '856404' : '721C24';
+        aplicarEstilo(wsMatriz, XLSX.utils.encode_cell({ r, c: 4 }), {
+            ...alt,
+            alignment: { horizontal: 'center' },
+            font: { ...alt.font, bold: true, color: { rgb: corPct } },
+            fill: { fgColor: { rgb: fillPct } }
+        });
+        codigosExame.forEach((codigo, idx) => {
+            const c = 5 + idx;
+            const v = aoaMatriz[r][c];
+            const ref = XLSX.utils.encode_cell({ r, c });
+            if (v === '⚠ TEXTO') aplicarEstilo(wsMatriz, ref, ESTILO_ZERADO);
+            else if (v === '' || v === null || v === undefined) aplicarEstilo(wsMatriz, ref, ESTILO_VAZIO);
+            else aplicarEstilo(wsMatriz, ref, ESTILO_PREENCHIDO);
+        });
+    }
+    XLSX.utils.book_append_sheet(wb, wsMatriz, 'Matriz');
+
+    // ───────── ABA 4: NUMBER ZERADOS ─────────
+    if (auditoria.numberZerados.length > 0) {
+        const aoaZerados = [
+            ['CAMPOS NUMBER ZERADOS POR TEXTO'],
+            ['O laboratório enviou texto em campos numéricos — foram deixados vazios para evitar erro no Tasy'],
+            [],
+            ['Atendimento', 'Paciente', 'Código', 'Exame', 'Origem', 'Texto recebido']
+        ];
+        auditoria.numberZerados.forEach(n => {
+            aoaZerados.push([n.atendimento, n.paciente, n.codigo, n.nome, n.origem || '', n.textoOriginal]);
+        });
+        const wsZerados = XLSX.utils.aoa_to_sheet(aoaZerados);
+        wsZerados['!cols'] = [{ wch: 12 }, { wch: 32 }, { wch: 10 }, { wch: 35 }, { wch: 16 }, { wch: 60 }];
+        wsZerados['!merges'] = [
+            { s: { r: 0, c: 0 }, e: { r: 0, c: 5 } },
+            { s: { r: 1, c: 0 }, e: { r: 1, c: 5 } }
+        ];
+        wsZerados['!rows'] = [{ hpt: 28 }, { hpt: 22 }];
+        wsZerados['!freeze'] = { xSplit: 0, ySplit: 4 };
+        aplicarEstilo(wsZerados, 'A1', ESTILO_TITULO);
+        aplicarEstilo(wsZerados, 'A2', ESTILO_SUBTITULO);
+        ['A4', 'B4', 'C4', 'D4', 'E4', 'F4'].forEach(ref => aplicarEstilo(wsZerados, ref, ESTILO_HEADER));
+        for (let r = 4; r < aoaZerados.length; r++) {
+            const alt = r % 2 === 0 ? ESTILO_CELULA : ESTILO_CELULA_ALT;
+            aplicarEstilo(wsZerados, `A${r + 1}`, { ...alt, alignment: { horizontal: 'center' } });
+            aplicarEstilo(wsZerados, `B${r + 1}`, alt);
+            aplicarEstilo(wsZerados, `C${r + 1}`, { ...alt, alignment: { horizontal: 'center' } });
+            aplicarEstilo(wsZerados, `D${r + 1}`, alt);
+            aplicarEstilo(wsZerados, `E${r + 1}`, { ...alt, alignment: { horizontal: 'center' } });
+            aplicarEstilo(wsZerados, `F${r + 1}`, { ...alt, font: { ...alt.font, italic: true, color: { rgb: '721C24' } }, fill: { fgColor: { rgb: 'FBEAEC' } } });
+        }
+        XLSX.utils.book_append_sheet(wb, wsZerados, 'NUMBER_Zerados');
+    }
+
+    // ───────── ABA 5: COLUNAS NÃO MAPEADAS ─────────
+    if (auditoria.colunasOrfas.length > 0) {
+        const aoaOrfas = [
+            ['COLUNAS DO LABORATÓRIO NÃO MAPEADAS'],
+            ['Colunas presentes nas planilhas do lab mas que não estão no MAPEAMENTO_EXAMES'],
+            [],
+            ['Coluna', 'Planilha de origem']
+        ];
+        auditoria.colunasOrfas.forEach(o => aoaOrfas.push([o.coluna, o.planilha]));
+        const wsOrfas = XLSX.utils.aoa_to_sheet(aoaOrfas);
+        wsOrfas['!cols'] = [{ wch: 30 }, { wch: 24 }];
+        wsOrfas['!merges'] = [
+            { s: { r: 0, c: 0 }, e: { r: 0, c: 1 } },
+            { s: { r: 1, c: 0 }, e: { r: 1, c: 1 } }
+        ];
+        wsOrfas['!rows'] = [{ hpt: 28 }, { hpt: 20 }];
+        aplicarEstilo(wsOrfas, 'A1', ESTILO_TITULO);
+        aplicarEstilo(wsOrfas, 'A2', ESTILO_SUBTITULO);
+        ['A4', 'B4'].forEach(ref => aplicarEstilo(wsOrfas, ref, ESTILO_HEADER));
+        for (let r = 4; r < aoaOrfas.length; r++) {
+            const alt = r % 2 === 0 ? ESTILO_CELULA : ESTILO_CELULA_ALT;
+            aplicarEstilo(wsOrfas, `A${r + 1}`, { ...alt, font: { ...alt.font, bold: true } });
+            aplicarEstilo(wsOrfas, `B${r + 1}`, { ...alt, alignment: { horizontal: 'center' } });
+        }
+        XLSX.utils.book_append_sheet(wb, wsOrfas, 'Colunas_NaoMapeadas');
+    }
+
+    const dataFormatada = hoje.toISOString().split('T')[0].replace(/-/g, '');
+    const nomeArquivo = `Auditoria_${estab}_${dataFormatada}.xlsx`;
+
+    // xlsx para preservar todos os estilos (cores, bordas, fontes)
+    const wbout = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+    const blob = new Blob([wbout], { type: 'application/octet-stream' });
+
+    document.getElementById('btnDownloadAuditoria').onclick = function() {
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
@@ -1095,7 +1336,7 @@ function mostrarAuditoria() {
         <h4 style="margin: 25px 0 10px; color: #495057;">Resumo por Paciente</h4>
         <div class="alert alert-info">
             <span>📊</span>
-            <div>Clique em <strong>"Ver detalhes"</strong> para ver quais exames foram preenchidos e quais ficaram vazios em cada paciente. A planilha <strong>Auditoria_Matriz</strong> dentro do <code>.xls</code> traz tudo em formato tabular.</div>
+            <div>Clique em <strong>"Ver detalhes"</strong> para ver quais exames foram preenchidos e quais ficaram vazios em cada paciente. Use o botão <strong>📊 Download Auditoria</strong> para baixar o relatório completo em planilha (formatada, com matriz, cobertura, NUMBER zerados e colunas órfãs).</div>
         </div>
         <div style="max-height: 500px; overflow-y: auto; background: #f8f9fa; border-radius: 10px; padding: 15px;">
         <table class="audit-table">
