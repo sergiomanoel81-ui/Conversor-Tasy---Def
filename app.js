@@ -1079,45 +1079,16 @@ function mostrarAuditoria() {
         </div>
     `;
 
-    // Cobertura por exame
-    html += `
-        <h4 style="margin: 25px 0 10px; color: #495057;">Cobertura por Exame</h4>
-        <div style="max-height: 350px; overflow-y: auto; background: #f8f9fa; border-radius: 10px; padding: 15px;">
-        <table class="audit-table">
-            <thead>
-                <tr><th>Código</th><th>Exame</th><th>Tipo</th><th>Preench.</th><th>Vazios</th><th>%</th><th>NUMBER zerado</th></tr>
-            </thead>
-            <tbody>
-    `;
-    Object.keys(MAPEAMENTO_EXAMES).forEach(codigo => {
-        const cov = auditoria.examesCobertura[codigo];
-        if (!cov) return;
-        const total = cov.preenchidos + cov.vazios;
-        const pct = total > 0 ? Math.round((cov.preenchidos / total) * 100) : 0;
-        const cor = pct >= 80 ? '#28a745' : pct >= 40 ? '#ffc107' : '#dc3545';
-        html += `
-            <tr>
-                <td><code>${codigo}</code></td>
-                <td>${cov.nome}</td>
-                <td><span class="status-badge badge-${cov.tipo === 'NUMBER' ? 'success' : 'warning'}">${cov.tipo}</span></td>
-                <td style="color:#28a745; font-weight:600;">${cov.preenchidos}</td>
-                <td style="color:#6c757d;">${cov.vazios}</td>
-                <td style="color:${cor}; font-weight:bold;">${pct}%</td>
-                <td>${cov.numberZerados > 0 ? `<span class="status-badge badge-danger">${cov.numberZerados}</span>` : '—'}</td>
-            </tr>
-        `;
-    });
-    html += `</tbody></table></div>`;
-
     // Matriz paciente × exame
     html += `
         <h4 style="margin: 25px 0 10px; color: #495057;">Matriz Paciente × Exame</h4>
-        <div style="max-height: 400px; overflow: auto; background: #f8f9fa; border-radius: 10px; padding: 15px;">
+        <div style="max-height: 500px; overflow: auto; background: #f8f9fa; border-radius: 10px; padding: 15px;">
         <table class="audit-table">
             <thead><tr><th>Atend.</th><th>Paciente</th><th>Preench.</th>
     `;
     Object.keys(MAPEAMENTO_EXAMES).forEach(codigo => {
-        html += `<th title="${MAPEAMENTO_EXAMES[codigo].nome}">${codigo}</th>`;
+        const nome = MAPEAMENTO_EXAMES[codigo].nome;
+        html += `<th title="Código ${codigo}" style="white-space: nowrap;">${nome} (${codigo})</th>`;
     });
     html += `</tr></thead><tbody>`;
     auditoria.porPaciente.forEach(p => {
