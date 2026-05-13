@@ -62,9 +62,30 @@ const ESTABELECIMENTOS = {
 let dadosTasy = null;
 let dadosBasicos = null;
 let dadosComplementares = null;
+let colunasBasicos = [];
+let colunasComplementares = [];
 let resultadoAnalise = null;
 let vinculacoesManuais = {};
-let camposVaziosPorTipo = []; // Rastrear campos deixados vazios
+
+// Estrutura de auditoria preenchida durante o processamento
+let auditoria = {
+    colunasOrfas: [],          // colunas das planilhas do lab não mapeadas
+    examesCobertura: {},        // {codigoExame: {preenchidos, vazios, total, origemBasicos, origemComplementares}}
+    porPaciente: [],            // [{nome, atendimento, preenchidos:[{cod,nome,valor,origem}], vazios:[{cod,nome}], numberZerados:[{cod,nome,textoOriginal}]}]
+    numberZerados: [],          // lista achatada: campos NUMBER que receberam texto e ficaram vazios
+    totalPreenchidos: 0,
+    totalVazios: 0,
+    origemBasicos: 0,
+    origemComplementares: 0
+};
+
+// Conjunto de todas as colunas mapeadas (achatado), usado para detectar órfãs
+const COLUNAS_MAPEADAS = new Set();
+Object.values(MAPEAMENTO_EXAMES).forEach(cfg => {
+    cfg.colunas.forEach(c => COLUNAS_MAPEADAS.add(c.toLowerCase()));
+});
+// Colunas estruturais conhecidas do lab que não são valores de exame
+const COLUNAS_ESTRUTURAIS_LAB = new Set(['nome', 'dthr_os', 'os', 'cod', 'codigo', 'data', 'paciente']);
 
 // Normalizar nome para comparação
 function normalizarNome(nome) {
@@ -147,23 +168,26 @@ function limparValorNumerico(valor) {
     return numero;
 }
 
-// Ler arquivo Excel/CSV
+// Ler arquivo Excel/CSV. Retorna { rows, headers } para permitir auditoria de colunas.
 function lerArquivo(file) {
     return new Promise((resolve, reject) => {
         const reader = new FileReader();
-        
+
         reader.onload = (e) => {
             try {
                 const data = new Uint8Array(e.target.result);
                 const workbook = XLSX.read(data, { type: 'array' });
                 const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
                 const jsonData = XLSX.utils.sheet_to_json(firstSheet, { raw: false });
-                resolve(jsonData);
+                // Cabeçalhos preservando ordem (linha 1 da planilha)
+                const arr = XLSX.utils.sheet_to_json(firstSheet, { header: 1, raw: false });
+                const headers = Array.isArray(arr[0]) ? arr[0].filter(h => h !== undefined && h !== null && h !== '') : [];
+                resolve({ rows: jsonData, headers });
             } catch (error) {
                 reject(error);
             }
         };
-        
+
         reader.onerror = reject;
         reader.readAsArrayBuffer(file);
     });
@@ -201,7 +225,8 @@ document.getElementById('fileTasy').addEventListener('change', async function(e)
     const file = e.target.files[0];
     if (file) {
         try {
-            dadosTasy = await lerArquivo(file);
+            const { rows } = await lerArquivo(file);
+            dadosTasy = rows;
             const box = document.getElementById('boxTasy');
             box.classList.add('uploaded');
             box.querySelector('.status-badge').textContent = `✓ ${dadosTasy.length} registros`;
@@ -217,7 +242,9 @@ document.getElementById('fileBasicos').addEventListener('change', async function
     const file = e.target.files[0];
     if (file) {
         try {
-            dadosBasicos = await lerArquivo(file);
+            const { rows, headers } = await lerArquivo(file);
+            dadosBasicos = rows;
+            colunasBasicos = headers;
             const box = document.getElementById('boxBasicos');
             box.classList.add('uploaded');
             box.querySelector('.status-badge').textContent = `✓ ${dadosBasicos.length} registros`;
@@ -233,7 +260,9 @@ document.getElementById('fileComplementares').addEventListener('change', async f
     const file = e.target.files[0];
     if (file) {
         try {
-            dadosComplementares = await lerArquivo(file);
+            const { rows, headers } = await lerArquivo(file);
+            dadosComplementares = rows;
+            colunasComplementares = headers;
             const box = document.getElementById('boxComplementares');
             box.classList.add('uploaded');
             box.querySelector('.status-badge').textContent = `✓ ${dadosComplementares.length} registros`;
@@ -527,6 +556,19 @@ async function processarArquivos() {
     document.getElementById('actionButtons3').style.display = 'none';
     
     try {
+        // Reset da auditoria antes de processar
+        auditoria = {
+            colunasOrfas: [],
+            examesCobertura: {},
+            porPaciente: [],
+            numberZerados: [],
+            totalPreenchidos: 0,
+            totalVazios: 0,
+            origemBasicos: 0,
+            origemComplementares: 0
+        };
+        detectarColunasOrfas();
+
         // Preparar dados para processamento
         const pacientesProcessar = [];
         
@@ -573,11 +615,14 @@ async function processarArquivos() {
         await gerarLog(resultados, nomeArquivo);
         
         atualizarProgresso(100);
-        
+
         // Mostrar resultado
         document.getElementById('resultSection').style.display = 'block';
         document.getElementById('btnDownloadExcel').style.display = 'inline-block';
         document.getElementById('btnDownloadLog').style.display = 'inline-block';
+
+        // Renderizar relatório de auditoria na tela
+        mostrarAuditoria();
         
     } catch (error) {
         alert('Erro ao processar: ' + error.message);
@@ -589,10 +634,7 @@ async function processarArquivos() {
 function processarPaciente(pacienteTasy, nomeLabNormalizado, estabelecimento, protocolo) {
     const nomePaciente = pacienteTasy.nm_paciente || pacienteTasy.NM_PACIENTE;
     const atendimento = pacienteTasy.nr_atendimento || pacienteTasy.NR_ATENDIMENTO;
-    
-    // Buscar dados nos laboratórios
-    let dataResultado = '';
-    
+
     const linha = {
         NM_PACIENTE: nomePaciente,
         NR_ATENDIMENTO: atendimento,
@@ -600,61 +642,132 @@ function processarPaciente(pacienteTasy, nomeLabNormalizado, estabelecimento, pr
         DS_PROTOCOLO: protocolo,
         CD_ESTABELECIMENTO: estabelecimento
     };
-    
-    // Buscar valores de todos os exames
+
+    const auditPaciente = {
+        nome: nomePaciente,
+        atendimento: atendimento,
+        preenchidos: [],
+        vazios: [],
+        numberZerados: []
+    };
+
     Object.keys(MAPEAMENTO_EXAMES).forEach(codigoExame => {
+        const config = MAPEAMENTO_EXAMES[codigoExame];
         const dados = encontrarDadosExame(codigoExame, nomeLabNormalizado);
-        linha[`NR_EXAME_${codigoExame}`] = dados.valor !== null ? dados.valor : '';
-        
+        const valor = dados.valor !== null ? dados.valor : '';
+        linha[`NR_EXAME_${codigoExame}`] = valor;
+
         if (!linha.DT_RESULTADO && dados.data) {
             linha.DT_RESULTADO = dados.data;
         }
+
+        // Garante slot na cobertura
+        if (!auditoria.examesCobertura[codigoExame]) {
+            auditoria.examesCobertura[codigoExame] = {
+                nome: config.nome,
+                tipo: config.tipo,
+                preenchidos: 0,
+                vazios: 0,
+                origemBasicos: 0,
+                origemComplementares: 0,
+                numberZerados: 0
+            };
+        }
+        const cov = auditoria.examesCobertura[codigoExame];
+
+        if (valor !== '' && valor !== null && valor !== undefined) {
+            cov.preenchidos++;
+            auditoria.totalPreenchidos++;
+            auditPaciente.preenchidos.push({ codigo: codigoExame, nome: config.nome, valor: valor, origem: dados.origem });
+            if (dados.origem === 'basicos') { cov.origemBasicos++; auditoria.origemBasicos++; }
+            else if (dados.origem === 'complementares') { cov.origemComplementares++; auditoria.origemComplementares++; }
+        } else {
+            cov.vazios++;
+            auditoria.totalVazios++;
+            auditPaciente.vazios.push({ codigo: codigoExame, nome: config.nome });
+        }
+
+        if (dados.numberZerado) {
+            cov.numberZerados++;
+            const item = {
+                paciente: nomePaciente,
+                atendimento: atendimento,
+                codigo: codigoExame,
+                nome: config.nome,
+                textoOriginal: dados.textoOriginal,
+                origem: dados.origem
+            };
+            auditoria.numberZerados.push(item);
+            auditPaciente.numberZerados.push(item);
+        }
     });
-    
+
+    auditoria.porPaciente.push(auditPaciente);
     return linha;
 }
 
 function encontrarDadosExame(codigoExame, nomeLabNormalizado) {
     const config = MAPEAMENTO_EXAMES[codigoExame];
-    if (!config) return { valor: null, data: null };
-    
-    const datasources = [dadosBasicos, dadosComplementares].filter(d => d !== null);
-    
-    for (const data of datasources) {
+    if (!config) return { valor: null, data: null, origem: null };
+
+    const datasources = [
+        { dados: dadosBasicos, origem: 'basicos' },
+        { dados: dadosComplementares, origem: 'complementares' }
+    ].filter(d => d.dados !== null);
+
+    for (const { dados: data, origem } of datasources) {
         for (const row of data) {
             if (normalizarNome(row.nome) === nomeLabNormalizado) {
                 for (const coluna of config.colunas) {
                     if (row[coluna] !== undefined && row[coluna] !== null && row[coluna] !== '') {
-                        let valorFinal = row[coluna];
-                        
+                        const valorOriginal = row[coluna];
+                        let valorFinal = valorOriginal;
+
                         if (config.tipo === 'NUMBER') {
                             valorFinal = limparValorNumerico(valorFinal);
-                            // Se limpeza falhou, deixar vazio
+                            // Se limpeza falhou, NUMBER recebeu texto: deixar vazio e registrar
                             if (valorFinal === '') {
-                                return { valor: null, data: row.dthr_os || null };
+                                return {
+                                    valor: null,
+                                    data: row.dthr_os || null,
+                                    origem: origem,
+                                    numberZerado: true,
+                                    textoOriginal: valorOriginal
+                                };
                             }
                         } else if (config.tipo === 'VARCHAR2') {
-                            // VARCHAR2 aceita até 1020 caracteres no Tasy
                             const textoStr = valorFinal.toString().trim();
-                            if (textoStr.length > 1020) {
-                                // Truncar se exceder limite
-                                valorFinal = textoStr.substring(0, 1020);
-                            } else {
-                                valorFinal = textoStr;
-                            }
+                            valorFinal = textoStr.length > 1020 ? textoStr.substring(0, 1020) : textoStr;
                         }
-                        
+
                         return {
                             valor: valorFinal,
-                            data: row.dthr_os || null
+                            data: row.dthr_os || null,
+                            origem: origem
                         };
                     }
                 }
             }
         }
     }
-    
-    return { valor: null, data: null };
+
+    return { valor: null, data: null, origem: null };
+}
+
+// Detecta colunas das planilhas do laboratório que não estão mapeadas
+function detectarColunasOrfas() {
+    const orfas = [];
+    const registrar = (header, planilha) => {
+        if (!header) return;
+        const lower = header.toString().toLowerCase().trim();
+        if (!lower) return;
+        if (COLUNAS_ESTRUTURAIS_LAB.has(lower)) return;
+        if (COLUNAS_MAPEADAS.has(lower)) return;
+        orfas.push({ coluna: header, planilha });
+    };
+    colunasBasicos.forEach(h => registrar(h, 'basicos'));
+    colunasComplementares.forEach(h => registrar(h, 'complementares'));
+    auditoria.colunasOrfas = orfas;
 }
 
 function atualizarProgresso(percentual) {
@@ -664,19 +777,83 @@ function atualizarProgresso(percentual) {
 }
 
 async function gerarArquivoExcel(resultados, estabelecimento) {
-    const ws = XLSX.utils.json_to_sheet(resultados, { header: ORDEM_COLUNAS });
     const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'Exames');
-    
+
+    // Aba principal: Exames
+    const wsExames = XLSX.utils.json_to_sheet(resultados, { header: ORDEM_COLUNAS });
+    XLSX.utils.book_append_sheet(wb, wsExames, 'Exames');
+
+    // Aba: Auditoria - Cobertura por Exame
+    const cobertura = Object.keys(MAPEAMENTO_EXAMES).map(codigo => {
+        const cov = auditoria.examesCobertura[codigo];
+        if (!cov) return null;
+        const total = cov.preenchidos + cov.vazios;
+        const pct = total > 0 ? Math.round((cov.preenchidos / total) * 100) : 0;
+        return {
+            CODIGO: codigo,
+            EXAME: cov.nome,
+            TIPO: cov.tipo,
+            PREENCHIDOS: cov.preenchidos,
+            VAZIOS: cov.vazios,
+            TOTAL: total,
+            'COBERTURA_%': pct,
+            ORIGEM_BASICOS: cov.origemBasicos,
+            ORIGEM_COMPLEMENTARES: cov.origemComplementares,
+            NUMBER_ZERADOS: cov.numberZerados
+        };
+    }).filter(Boolean);
+    const wsCobertura = XLSX.utils.json_to_sheet(cobertura);
+    XLSX.utils.book_append_sheet(wb, wsCobertura, 'Auditoria_Cobertura');
+
+    // Aba: Auditoria - Matriz Paciente x Exame
+    const matriz = auditoria.porPaciente.map(p => {
+        const linha = {
+            NM_PACIENTE: p.nome,
+            NR_ATENDIMENTO: p.atendimento,
+            QTD_PREENCHIDOS: p.preenchidos.length,
+            QTD_VAZIOS: p.vazios.length
+        };
+        Object.keys(MAPEAMENTO_EXAMES).forEach(codigo => {
+            const preenchido = p.preenchidos.find(e => e.codigo === codigo);
+            linha[`${codigo}_${MAPEAMENTO_EXAMES[codigo].nome}`] = preenchido ? '✓' : '';
+        });
+        return linha;
+    });
+    const wsMatriz = XLSX.utils.json_to_sheet(matriz);
+    XLSX.utils.book_append_sheet(wb, wsMatriz, 'Auditoria_Matriz');
+
+    // Aba: Campos NUMBER zerados (recebido texto)
+    if (auditoria.numberZerados.length > 0) {
+        const wsNumber = XLSX.utils.json_to_sheet(auditoria.numberZerados.map(n => ({
+            NM_PACIENTE: n.paciente,
+            NR_ATENDIMENTO: n.atendimento,
+            CODIGO: n.codigo,
+            EXAME: n.nome,
+            ORIGEM: n.origem,
+            TEXTO_RECEBIDO: n.textoOriginal
+        })));
+        XLSX.utils.book_append_sheet(wb, wsNumber, 'Auditoria_NumberZerados');
+    }
+
+    // Aba: Colunas órfãs do laboratório
+    if (auditoria.colunasOrfas.length > 0) {
+        const wsOrfas = XLSX.utils.json_to_sheet(auditoria.colunasOrfas.map(o => ({
+            COLUNA: o.coluna,
+            PLANILHA: o.planilha,
+            OBSERVACAO: 'Coluna presente no arquivo do laboratório mas não mapeada para código Tasy'
+        })));
+        XLSX.utils.book_append_sheet(wb, wsOrfas, 'Auditoria_ColunasOrfas');
+    }
+
     const hoje = new Date();
     const dataFormatada = hoje.toISOString().split('T')[0].replace(/-/g, '');
     const nomeEstabelecimento = ESTABELECIMENTOS[estabelecimento];
-    const nomeArquivo = `Exames_${nomeEstabelecimento}_${dataFormatada}.xlsx`;
-    
-    // Salvar para download
-    const wbout = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
-    const blob = new Blob([wbout], { type: 'application/octet-stream' });
-    
+    const nomeArquivo = `Exames_${nomeEstabelecimento}_${dataFormatada}.xls`;
+
+    // Exportar em formato BIFF8 (.xls - Excel 97-2003)
+    const wbout = XLSX.write(wb, { bookType: 'biff8', type: 'array' });
+    const blob = new Blob([wbout], { type: 'application/vnd.ms-excel' });
+
     document.getElementById('btnDownloadExcel').onclick = function() {
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
@@ -684,7 +861,7 @@ async function gerarArquivoExcel(resultados, estabelecimento) {
         a.download = nomeArquivo;
         a.click();
     };
-    
+
     return nomeArquivo;
 }
 
@@ -747,6 +924,87 @@ Pacientes excluídos (sem resultado): ${resultadoAnalise.semResultados.length}
         }
     }
 
+    // ═══════════════════════════════════════════════
+    // SEÇÃO DE AUDITORIA
+    // ═══════════════════════════════════════════════
+    log += `\n\n═══════════════════════════════════════════════════════════════
+📊 AUDITORIA - COBERTURA POR EXAME
+═══════════════════════════════════════════════════════════════
+
+Total de campos preenchidos:    ${auditoria.totalPreenchidos}
+Total de campos vazios:         ${auditoria.totalVazios}
+Origem - Exames Básicos:        ${auditoria.origemBasicos}
+Origem - Exames Complementares: ${auditoria.origemComplementares}
+
+─────────────────────────────────────────────────────────────
+Cobertura por exame (preenchidos / total processados):
+─────────────────────────────────────────────────────────────
+`;
+
+    Object.keys(MAPEAMENTO_EXAMES).forEach(codigo => {
+        const cov = auditoria.examesCobertura[codigo];
+        if (!cov) return;
+        const total = cov.preenchidos + cov.vazios;
+        const pct = total > 0 ? Math.round((cov.preenchidos / total) * 100) : 0;
+        const nomeExame = cov.nome.padEnd(38);
+        const cnt = `${cov.preenchidos}/${total}`.padStart(8);
+        log += `\n  [${codigo}] ${nomeExame} ${cnt}  (${String(pct).padStart(3)}%)`;
+        if (cov.numberZerados > 0) {
+            log += `  ⚠️ ${cov.numberZerados} NUMBER zerado(s)`;
+        }
+    });
+
+    // Detalhes por paciente
+    log += `\n\n═══════════════════════════════════════════════════════════════
+👥 AUDITORIA - DETALHE POR PACIENTE
+═══════════════════════════════════════════════════════════════
+`;
+
+    auditoria.porPaciente.forEach((p, i) => {
+        log += `\n\n${i + 1}. Atend. ${p.atendimento} - ${p.nome}`;
+        log += `\n   ✅ ${p.preenchidos.length} preenchido(s) | ❌ ${p.vazios.length} vazio(s)`;
+        if (p.preenchidos.length > 0) {
+            log += `\n   Exames carregados:`;
+            p.preenchidos.forEach(e => {
+                log += `\n     • [${e.codigo}] ${e.nome} = ${e.valor} (origem: ${e.origem || 'n/d'})`;
+            });
+        }
+        if (p.numberZerados.length > 0) {
+            log += `\n   ⚠️ Campos NUMBER zerados (recebido texto):`;
+            p.numberZerados.forEach(z => {
+                log += `\n     • [${z.codigo}] ${z.nome} ← "${z.textoOriginal}"`;
+            });
+        }
+    });
+
+    // Campos NUMBER que receberam texto
+    if (auditoria.numberZerados.length > 0) {
+        log += `\n\n═══════════════════════════════════════════════════════════════
+⚠️ AUDITORIA - CAMPOS NUMBER ZERADOS POR TEXTO (${auditoria.numberZerados.length})
+═══════════════════════════════════════════════════════════════
+`;
+        auditoria.numberZerados.forEach((n, i) => {
+            log += `\n${i + 1}. Atend. ${n.atendimento} - ${n.paciente}`;
+            log += `\n   Exame: [${n.codigo}] ${n.nome}`;
+            log += `\n   Texto recebido: "${n.textoOriginal}"`;
+            log += `\n   Origem: ${n.origem || 'n/d'}\n`;
+        });
+    }
+
+    // Colunas órfãs
+    if (auditoria.colunasOrfas.length > 0) {
+        log += `\n\n═══════════════════════════════════════════════════════════════
+🔎 AUDITORIA - COLUNAS DO LABORATÓRIO NÃO MAPEADAS (${auditoria.colunasOrfas.length})
+═══════════════════════════════════════════════════════════════
+
+As colunas abaixo existem nas planilhas do lab mas NÃO estão no
+MAPEAMENTO_EXAMES e por isso não foram exportadas:
+`;
+        auditoria.colunasOrfas.forEach((o, i) => {
+            log += `\n${i + 1}. "${o.coluna}" (planilha: ${o.planilha})`;
+        });
+    }
+
     log += `\n\n═══════════════════════════════════════════════════════════════
 ℹ️ OBSERVAÇÕES TÉCNICAS
 ═══════════════════════════════════════════════════════════════
@@ -784,4 +1042,146 @@ FIM DO LOG
         a.download = nomeLog;
         a.click();
     };
+}
+
+// Renderiza o relatório de auditoria na tela (Fase 3, após processar)
+function mostrarAuditoria() {
+    const container = document.getElementById('auditoriaContainer');
+    if (!container) return;
+
+    const totalCampos = auditoria.totalPreenchidos + auditoria.totalVazios;
+    const pctGeral = totalCampos > 0 ? Math.round((auditoria.totalPreenchidos / totalCampos) * 100) : 0;
+
+    // Cards resumo
+    let html = `
+        <h3 style="margin: 30px 0 15px; color: #495057;">📊 Relatório de Auditoria</h3>
+        <div class="dashboard">
+            <div class="card success">
+                <div class="card-icon">✅</div>
+                <div class="card-number">${auditoria.totalPreenchidos}</div>
+                <div class="card-title">Campos Preenchidos (${pctGeral}%)</div>
+            </div>
+            <div class="card warning">
+                <div class="card-icon">⚪</div>
+                <div class="card-number">${auditoria.totalVazios}</div>
+                <div class="card-title">Campos Vazios</div>
+            </div>
+            <div class="card">
+                <div class="card-icon">📋</div>
+                <div class="card-number">${auditoria.origemBasicos}</div>
+                <div class="card-title">Origem: Básicos</div>
+            </div>
+            <div class="card">
+                <div class="card-icon">🔬</div>
+                <div class="card-number">${auditoria.origemComplementares}</div>
+                <div class="card-title">Origem: Complementares</div>
+            </div>
+        </div>
+    `;
+
+    // Cobertura por exame
+    html += `
+        <h4 style="margin: 25px 0 10px; color: #495057;">Cobertura por Exame</h4>
+        <div style="max-height: 350px; overflow-y: auto; background: #f8f9fa; border-radius: 10px; padding: 15px;">
+        <table class="audit-table">
+            <thead>
+                <tr><th>Código</th><th>Exame</th><th>Tipo</th><th>Preench.</th><th>Vazios</th><th>%</th><th>NUMBER zerado</th></tr>
+            </thead>
+            <tbody>
+    `;
+    Object.keys(MAPEAMENTO_EXAMES).forEach(codigo => {
+        const cov = auditoria.examesCobertura[codigo];
+        if (!cov) return;
+        const total = cov.preenchidos + cov.vazios;
+        const pct = total > 0 ? Math.round((cov.preenchidos / total) * 100) : 0;
+        const cor = pct >= 80 ? '#28a745' : pct >= 40 ? '#ffc107' : '#dc3545';
+        html += `
+            <tr>
+                <td><code>${codigo}</code></td>
+                <td>${cov.nome}</td>
+                <td><span class="status-badge badge-${cov.tipo === 'NUMBER' ? 'success' : 'warning'}">${cov.tipo}</span></td>
+                <td style="color:#28a745; font-weight:600;">${cov.preenchidos}</td>
+                <td style="color:#6c757d;">${cov.vazios}</td>
+                <td style="color:${cor}; font-weight:bold;">${pct}%</td>
+                <td>${cov.numberZerados > 0 ? `<span class="status-badge badge-danger">${cov.numberZerados}</span>` : '—'}</td>
+            </tr>
+        `;
+    });
+    html += `</tbody></table></div>`;
+
+    // Matriz paciente × exame
+    html += `
+        <h4 style="margin: 25px 0 10px; color: #495057;">Matriz Paciente × Exame</h4>
+        <div style="max-height: 400px; overflow: auto; background: #f8f9fa; border-radius: 10px; padding: 15px;">
+        <table class="audit-table">
+            <thead><tr><th>Atend.</th><th>Paciente</th><th>Preench.</th>
+    `;
+    Object.keys(MAPEAMENTO_EXAMES).forEach(codigo => {
+        html += `<th title="${MAPEAMENTO_EXAMES[codigo].nome}">${codigo}</th>`;
+    });
+    html += `</tr></thead><tbody>`;
+    auditoria.porPaciente.forEach(p => {
+        html += `<tr><td>${p.atendimento}</td><td>${p.nome}</td><td><strong>${p.preenchidos.length}</strong>/${p.preenchidos.length + p.vazios.length}</td>`;
+        Object.keys(MAPEAMENTO_EXAMES).forEach(codigo => {
+            const preench = p.preenchidos.find(e => e.codigo === codigo);
+            const zerado = p.numberZerados.find(e => e.codigo === codigo);
+            if (zerado) {
+                html += `<td title="NUMBER zerado: '${zerado.textoOriginal}'" style="background:#f8d7da; text-align:center; color:#721c24;">⚠</td>`;
+            } else if (preench) {
+                html += `<td title="${preench.valor} (${preench.origem})" style="background:#d4edda; text-align:center; color:#155724;">✓</td>`;
+            } else {
+                html += `<td style="text-align:center; color:#adb5bd;">—</td>`;
+            }
+        });
+        html += `</tr>`;
+    });
+    html += `</tbody></table></div>`;
+
+    // NUMBER zerados
+    if (auditoria.numberZerados.length > 0) {
+        html += `
+            <h4 style="margin: 25px 0 10px; color: #721c24;">⚠️ Campos NUMBER Zerados (${auditoria.numberZerados.length})</h4>
+            <div class="alert alert-warning">
+                <span>ℹ️</span>
+                <div>Os campos abaixo são <strong>NUMBER</strong> no Tasy mas o laboratório enviou texto. Foram deixados vazios para evitar erro de importação.</div>
+            </div>
+            <div style="max-height: 250px; overflow-y: auto; background: #f8f9fa; border-radius: 10px; padding: 15px;">
+            <table class="audit-table">
+                <thead><tr><th>Atend.</th><th>Paciente</th><th>Código</th><th>Exame</th><th>Origem</th><th>Texto recebido</th></tr></thead>
+                <tbody>
+        `;
+        auditoria.numberZerados.forEach(n => {
+            html += `<tr>
+                <td>${n.atendimento}</td>
+                <td>${n.paciente}</td>
+                <td><code>${n.codigo}</code></td>
+                <td>${n.nome}</td>
+                <td>${n.origem || '—'}</td>
+                <td style="color:#721c24;">"${n.textoOriginal}"</td>
+            </tr>`;
+        });
+        html += `</tbody></table></div>`;
+    }
+
+    // Colunas órfãs
+    if (auditoria.colunasOrfas.length > 0) {
+        html += `
+            <h4 style="margin: 25px 0 10px; color: #856404;">🔎 Colunas do Lab Não Mapeadas (${auditoria.colunasOrfas.length})</h4>
+            <div class="alert alert-info">
+                <span>ℹ️</span>
+                <div>Colunas presentes nas planilhas do laboratório que <strong>não estão no mapeamento</strong> e por isso não foram exportadas. Se forem relevantes, adicione-as ao <code>MAPEAMENTO_EXAMES</code>.</div>
+            </div>
+            <div style="background: #f8f9fa; border-radius: 10px; padding: 15px;">
+            <table class="audit-table">
+                <thead><tr><th>Coluna</th><th>Planilha</th></tr></thead>
+                <tbody>
+        `;
+        auditoria.colunasOrfas.forEach(o => {
+            html += `<tr><td><code>${o.coluna}</code></td><td>${o.planilha}</td></tr>`;
+        });
+        html += `</tbody></table></div>`;
+    }
+
+    container.innerHTML = html;
+    container.style.display = 'block';
 }
