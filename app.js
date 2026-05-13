@@ -807,29 +807,30 @@ async function gerarArquivoExcel(resultados, estabelecimento) {
 // ───────────────────────────────────────────────────────────────
 // Estilos reutilizáveis para a planilha de auditoria
 // ───────────────────────────────────────────────────────────────
+// Paleta bordô (vinho) — identidade visual do relatório de auditoria
 const ESTILO_TITULO = {
     font: { name: 'Calibri', sz: 16, bold: true, color: { rgb: 'FFFFFF' } },
-    fill: { fgColor: { rgb: '4B3F8A' } },
+    fill: { fgColor: { rgb: '5D1A1D' } },
     alignment: { horizontal: 'center', vertical: 'center' },
     border: {
-        top: { style: 'thin', color: { rgb: '2C2456' } },
-        bottom: { style: 'thin', color: { rgb: '2C2456' } },
-        left: { style: 'thin', color: { rgb: '2C2456' } },
-        right: { style: 'thin', color: { rgb: '2C2456' } }
+        top: { style: 'thin', color: { rgb: '3D0F11' } },
+        bottom: { style: 'thin', color: { rgb: '3D0F11' } },
+        left: { style: 'thin', color: { rgb: '3D0F11' } },
+        right: { style: 'thin', color: { rgb: '3D0F11' } }
     }
 };
 const ESTILO_SUBTITULO = {
-    font: { name: 'Calibri', sz: 11, italic: true, color: { rgb: '495057' } },
-    fill: { fgColor: { rgb: 'F1F0FA' } },
+    font: { name: 'Calibri', sz: 11, italic: true, color: { rgb: '5D1A1D' } },
+    fill: { fgColor: { rgb: 'F8EAEC' } },
     alignment: { horizontal: 'center', vertical: 'center' }
 };
 const ESTILO_HEADER = {
     font: { name: 'Calibri', sz: 11, bold: true, color: { rgb: 'FFFFFF' } },
-    fill: { fgColor: { rgb: '667EEA' } },
+    fill: { fgColor: { rgb: '8B2C3E' } },
     alignment: { horizontal: 'center', vertical: 'center', wrapText: true },
     border: {
         top: { style: 'thin', color: { rgb: 'FFFFFF' } },
-        bottom: { style: 'medium', color: { rgb: '4B3F8A' } },
+        bottom: { style: 'medium', color: { rgb: '5D1A1D' } },
         left: { style: 'thin', color: { rgb: 'FFFFFF' } },
         right: { style: 'thin', color: { rgb: 'FFFFFF' } }
     }
@@ -838,15 +839,15 @@ const ESTILO_CELULA = {
     font: { name: 'Calibri', sz: 10 },
     alignment: { vertical: 'center', wrapText: false },
     border: {
-        top: { style: 'thin', color: { rgb: 'B8B0E8' } },
-        bottom: { style: 'thin', color: { rgb: 'B8B0E8' } },
-        left: { style: 'thin', color: { rgb: 'B8B0E8' } },
-        right: { style: 'thin', color: { rgb: 'B8B0E8' } }
+        top: { style: 'thin', color: { rgb: 'D4A8AE' } },
+        bottom: { style: 'thin', color: { rgb: 'D4A8AE' } },
+        left: { style: 'thin', color: { rgb: 'D4A8AE' } },
+        right: { style: 'thin', color: { rgb: 'D4A8AE' } }
     }
 };
 const ESTILO_CELULA_ALT = {
     ...ESTILO_CELULA,
-    fill: { fgColor: { rgb: 'F8F9FA' } }
+    fill: { fgColor: { rgb: 'FBF3F4' } }
 };
 const ESTILO_PREENCHIDO = {
     ...ESTILO_CELULA,
