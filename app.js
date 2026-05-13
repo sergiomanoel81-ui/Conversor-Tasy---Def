@@ -1090,19 +1090,19 @@ function mostrarAuditoria() {
         </div>
     `;
 
-    // Resumo simples por paciente (sem a matriz larga)
+    // Resumo por paciente com detalhes expansíveis (preenchidos x vazios)
     html += `
         <h4 style="margin: 25px 0 10px; color: #495057;">Resumo por Paciente</h4>
         <div class="alert alert-info">
             <span>📊</span>
-            <div>A matriz detalhada <strong>Paciente × Exame</strong> está na aba <strong>Auditoria_Matriz</strong> do arquivo <code>.xls</code> baixado — formato planilha, fácil de filtrar e imprimir.</div>
+            <div>Clique em <strong>"Ver detalhes"</strong> para ver quais exames foram preenchidos e quais ficaram vazios em cada paciente. A planilha <strong>Auditoria_Matriz</strong> dentro do <code>.xls</code> traz tudo em formato tabular.</div>
         </div>
-        <div style="max-height: 400px; overflow-y: auto; background: #f8f9fa; border-radius: 10px; padding: 15px;">
+        <div style="max-height: 500px; overflow-y: auto; background: #f8f9fa; border-radius: 10px; padding: 15px;">
         <table class="audit-table">
-            <thead><tr><th>Atend.</th><th>Paciente</th><th>Preenchidos</th><th>Vazios</th><th>NUMBER zerados</th></tr></thead>
+            <thead><tr><th>Atend.</th><th>Paciente</th><th>Preenchidos</th><th>Vazios</th><th>NUMBER zerados</th><th>Detalhes</th></tr></thead>
             <tbody>
     `;
-    auditoria.porPaciente.forEach(p => {
+    auditoria.porPaciente.forEach((p, idx) => {
         const total = p.preenchidos.length + p.vazios.length;
         const pct = total > 0 ? Math.round((p.preenchidos.length / total) * 100) : 0;
         const cor = pct >= 80 ? '#28a745' : pct >= 40 ? '#ffc107' : '#dc3545';
@@ -1112,6 +1112,37 @@ function mostrarAuditoria() {
             <td style="color:#28a745; font-weight:600;">${p.preenchidos.length}/${total} <span style="color:${cor};">(${pct}%)</span></td>
             <td style="color:#6c757d;">${p.vazios.length}</td>
             <td>${p.numberZerados.length > 0 ? `<span class="status-badge badge-danger">${p.numberZerados.length}</span>` : '—'}</td>
+            <td><button class="btn btn-primary btn-small" onclick="toggleDetalhesPaciente(${idx})" id="btn-det-${idx}">+ Ver detalhes</button></td>
+        </tr>`;
+
+        // Linha expansível com listas de preenchidos e vazios
+        const listaPreench = p.preenchidos.length > 0
+            ? p.preenchidos.map(e => `<li>✅ <strong>${e.nome}</strong> = <span style="color:#155724;">${e.valor}</span> <small style="color:#6c757d;">(${e.origem || 'n/d'})</small></li>`).join('')
+            : '<li style="color:#6c757d;">Nenhum exame preenchido</li>';
+        const listaVazios = p.vazios.length > 0
+            ? p.vazios.map(e => `<li>⚪ ${e.nome} <small style="color:#adb5bd;">(${e.codigo})</small></li>`).join('')
+            : '<li style="color:#6c757d;">Todos os exames foram preenchidos</li>';
+        const listaZerados = p.numberZerados.length > 0
+            ? `<div style="background:#f8d7da; border-radius:8px; padding:10px; margin-top:10px;">
+                 <strong style="color:#721c24;">⚠️ Campos NUMBER zerados (recebido texto):</strong>
+                 <ul style="margin:6px 0 0 18px; color:#721c24;">${p.numberZerados.map(z => `<li>${z.nome}: "${z.textoOriginal}"</li>`).join('')}</ul>
+               </div>`
+            : '';
+
+        html += `<tr id="det-${idx}" style="display:none;">
+            <td colspan="6" style="background:#fff; padding:15px;">
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:15px;">
+                    <div style="background:#d4edda; border-radius:8px; padding:12px;">
+                        <strong style="color:#155724;">✅ Preenchidos (${p.preenchidos.length})</strong>
+                        <ul style="margin:8px 0 0 18px;">${listaPreench}</ul>
+                    </div>
+                    <div style="background:#e9ecef; border-radius:8px; padding:12px;">
+                        <strong style="color:#495057;">⚪ Vazios (${p.vazios.length})</strong>
+                        <ul style="margin:8px 0 0 18px;">${listaVazios}</ul>
+                    </div>
+                </div>
+                ${listaZerados}
+            </td>
         </tr>`;
     });
     html += `</tbody></table></div>`;
@@ -1163,4 +1194,18 @@ function mostrarAuditoria() {
 
     container.innerHTML = html;
     container.style.display = 'block';
+}
+
+// Alterna a exibição da linha de detalhes (preenchidos / vazios) de um paciente
+function toggleDetalhesPaciente(idx) {
+    const linha = document.getElementById(`det-${idx}`);
+    const btn = document.getElementById(`btn-det-${idx}`);
+    if (!linha) return;
+    if (linha.style.display === 'none' || linha.style.display === '') {
+        linha.style.display = 'table-row';
+        btn.textContent = '− Ocultar';
+    } else {
+        linha.style.display = 'none';
+        btn.textContent = '+ Ver detalhes';
+    }
 }
